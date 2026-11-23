@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A `dservercore` extension plugin that lets a [dserver](https://github.com/livMatS/dservercore)
+A `dservercore` extension plugin that lets a [dserver](https://github.com/jic-dtool/dservercore)
 instance answer "give me every dataset in the same dependency graph as this UUID."
 It registers a Flask blueprint at `/graph` and is wired into the host server through the
 `dservercore.extension` entry point (`pyproject.toml`):
@@ -17,7 +17,7 @@ that the search/retrieve mongo plugins populate, building MongoDB *views* on top
 ## Commands
 
 ```bash
-# Install with test deps (needs the sibling livMatS plugins, see test.yml for git installs)
+# Install with test deps (needs the sibling dserver plugins, see test.yml for git installs)
 pip install .[test]
 
 # Run the full test suite (requires a running MongoDB)
