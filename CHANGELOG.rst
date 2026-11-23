@@ -1,6 +1,12 @@
 Change log for dserver-dependency-graph-plugin
 ==============================================
 
+Unreleased
+----------
+
+* Build system changed from ``setuptools`` to ``hatchling`` with ``hatch-vcs``;
+  the version is still derived from git tags
+
 0.4.2 (13Oct25)
 ---------------
 
