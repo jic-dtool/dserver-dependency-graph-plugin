@@ -28,9 +28,9 @@ test = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/livMatS/dserver-dependency-graph-plugin/blob/main/README.rst"
-Repository = "https://github.com/livMatS/dserver-dependency-graph-plugin"
-Changelog = "https://github.com/livMatS/dserver-dependency-graph-plugin/blob/main/CHANGELOG.rst"
+Documentation = "https://github.com/jic-dtool/dserver-dependency-graph-plugin/blob/main/README.rst"
+Repository = "https://github.com/jic-dtool/dserver-dependency-graph-plugin"
+Changelog = "https://github.com/jic-dtool/dserver-dependency-graph-plugin/blob/main/CHANGELOG.rst"
 
 [project.entry-points."dservercore.extension"]
 DependencyGraphExtension = "dserver_dependency_graph_plugin:DependencyGraphExtension"

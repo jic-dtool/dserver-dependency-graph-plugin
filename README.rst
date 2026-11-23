@@ -1,21 +1,21 @@
 dserver Dependency Graph Plugin
 ===============================
 
-.. |dtool| image:: https://github.com/livMatS/dserver-dependency-graph-plugin/blob/main/icons/22x22/dtool_logo.png?raw=True
+.. |dtool| image:: https://github.com/jic-dtool/dserver-dependency-graph-plugin/blob/main/icons/22x22/dtool_logo.png?raw=True
     :height: 20px
-    :target: https://github.com/livMatS/dserver-dependency-graph-plugin
+    :target: https://github.com/jic-dtool/dserver-dependency-graph-plugin
 .. |pypi| image:: https://img.shields.io/pypi/v/dserver-dependency-graph-plugin
     :target: https://pypi.org/project/dserver-dependency-graph-plugin/
-.. |tag| image:: https://img.shields.io/github/v/tag/livMatS/dserver-dependency-graph-plugin
-    :target: https://github.com/livMatS/dserver-dependency-graph-plugin/tags
-.. |test| image:: https://img.shields.io/github/actions/workflow/status/livMatS/dserver-dependency-graph-plugin/test.yml?branch=main&label=tests
-    :target: https://github.com/livMatS/dserver-dependency-graph-plugin/actions/workflows/test.yml
+.. |tag| image:: https://img.shields.io/github/v/tag/jic-dtool/dserver-dependency-graph-plugin
+    :target: https://github.com/jic-dtool/dserver-dependency-graph-plugin/tags
+.. |test| image:: https://img.shields.io/github/actions/workflow/status/jic-dtool/dserver-dependency-graph-plugin/test.yml?branch=main&label=tests
+    :target: https://github.com/jic-dtool/dserver-dependency-graph-plugin/actions/workflows/test.yml
 .. |zenodo| image:: https://zenodo.org/badge/298694291.svg
     :target: https://zenodo.org/doi/10.5281/zenodo.12702000
 
 |dtool| |pypi| |tag| |test| |zenodo|
 
-- GitHub: https://github.com/livMatS/dserver-dependency-graph-plugin
+- GitHub: https://github.com/jic-dtool/dserver-dependency-graph-plugin
 - PyPI: https://pypi.python.org/pypi/dserver-dependency-graph-plugin
 - Free software: MIT License
 
