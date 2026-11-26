@@ -1,352 +1,149 @@
-"""Aggregation pipelines for graph operations."""
+"""Traversal of dataset dependency graphs.
 
-from .config import Config
+Datasets record the datasets they were derived from under the dependency
+keys, e.g. ``readme_parsed.derived_from.uuid`` (README ``derived_from``
+entries) or ``annotations.source_dataset_uuid``. Starting from one dataset,
+the graph is explored level by level in both directions:
 
-# a regular expression to filter valid v4 UUIDs
-UUID_v4_REGEX = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[4][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
+- parents: the UUIDs the datasets of the current level name, and
+- children: the datasets naming a dataset of the current level.
 
+Every query is restricted to the base URIs the user may search, so the
+traversal never passes through, and the result never mentions, datasets the
+user cannot see. Queries use indexes on ``uuid`` and the dependency keys;
+nothing is precomputed over the whole collection.
+"""
 
-# most of those 'functions' are pretty static and just wrapped in function
-# definitions for convenience.
-def unwind_dependencies(dependency_keys=Config.DEPENDENCY_KEYS):
-    """Create parallel aggregation pipelines for unwinding all configured dependency keys."""
+import logging
+import re
 
-    parallel_aggregations = []
-    for dep_key in dependency_keys:
-        aggregation = []
-        hierarchy = dep_key.split('.')
+import dtoolcore.utils
 
-        for i in range(len(hierarchy)):
-            aggregation.append(
-                {
-                    '$unwind': {
-                        'path': '$' + '.'.join(hierarchy[0:(i+1)]),
-                        'preserveNullAndEmptyArrays': True,
-                    }
-                }
-            )
+logger = logging.getLogger(__name__)
 
-        aggregation.append(
-            {
-                '$project': {
-                    '_id': False,
-                    'uuid': True,
-                    'derived_from': '$' + dep_key,
-                }
-            }
-        )
-        parallel_aggregations.append(aggregation)
+UUID_REGEX = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{12}$")
 
-    return parallel_aggregations
+# Fields of a dataset in the response, as in dservercore's DatasetSchema,
+# plus derived_from.
+DATASET_FIELDS = (
+    "base_uri",
+    "created_at",
+    "creator_username",
+    "frozen_at",
+    "name",
+    "uri",
+    "uuid",
+    "number_of_items",
+    "size_in_bytes",
+    "uploaded_by",
+    "uploaded_at",
+)
 
-
-def merge_dependencies(dependency_keys=Config.DEPENDENCY_KEYS):
-    """Aggregate (directed) dependency graph edges.
-
-    All configured dependency keys are merged in a key-agnostic 'dependencies'
-    field."""
-
-    parallel_aggregations = unwind_dependencies(dependency_keys)
-
-    aggregation = [
-        {
-            '$facet': {
-                'key{:d}'.format(i): a for i, a in enumerate(parallel_aggregations)
-            }
-        },
-        {
-            '$project': {
-                'dependencies': {
-                    '$concatArrays': ['$key{:d}'.format(i) for i in range(len(parallel_aggregations))]
-                }
-            }
-        },
-        {
-            '$unwind': {
-                'path': '$dependencies',
-                'preserveNullAndEmptyArrays': True,
-            }
-        },
-        {
-            '$replaceRoot': {
-                'newRoot': '$dependencies'
-            }
-        }
-    ]
-    return aggregation
+TIMESTAMP_FIELDS = ("created_at", "frozen_at", "uploaded_at")
 
 
-def group_dependencies():
-    """Aggregate per-node adjacency lists of outgoing links."""
-    aggregation = [
-        {
-            '$group': {
-                '_id': '$uuid',
-                'dependencies': {'$push': '$derived_from'}
-            }
-        },
-        {
-            '$project': {
-                '_id': False,
-                'uuid': '$_id',
-                'dependencies': True
-            }
-        },
-    ]
-    return aggregation
+def values_at(document, path):
+    """Return all values at a dotted path, descending into lists."""
+    current = [document]
+    for part in path.split("."):
+        found = []
+        for value in current:
+            for item in value if isinstance(value, list) else [value]:
+                if isinstance(item, dict) and part in item:
+                    found.append(item[part])
+        current = found
+    values = []
+    for value in current:
+        values.extend(value if isinstance(value, list) else [value])
+    return values
 
 
-def group_inverse_dependencies():
-    """Aggregate per-node adjacency lists of incoming links."""
-    aggregation = [
-        {
-            '$group': {
-                '_id': '$derived_from',
-                'dependencies': {'$push': '$uuid'}
-            }
-        },
-        {
-            '$project': {
-                '_id': False,
-                'uuid': '$_id',
-                'dependencies': True
-            }
-        },
-    ]
-    return aggregation
+def parents_of(document, dependency_keys):
+    """Return the UUIDs a dataset document names as its parents."""
+    parents = set()
+    for key in dependency_keys:
+        for value in values_at(document, key):
+            if isinstance(value, str) and UUID_REGEX.match(value):
+                parents.add(value)
+    parents.discard(document.get("uuid"))
+    return parents
 
 
-def build_undirected_adjecency_lists(dependency_keys=Config.DEPENDENCY_KEYS):
-    """Aggregate undirected adjacency lists."""
-    aggregation = [
-        *merge_dependencies(dependency_keys),
-        {
-            '$facet': {
-                'derived_from': group_dependencies(),
-                'derivative': group_inverse_dependencies(),
-            }
-        },
-        {
-            '$project': {
-                'dependencies': {
-                    '$concatArrays': ['$derived_from', '$derivative']
-                }
-            }
-        },
-        {
-            '$unwind': {
-                'path': '$dependencies',
-                'preserveNullAndEmptyArrays': True,
-            }
-        },
-        {
-            '$replaceRoot': {
-                'newRoot': '$dependencies'
-            }
-        },
-        {  # filter invalid UUIDs (not UUID v4)
-            '$match': {
-                'uuid': {
-                    '$regex': UUID_v4_REGEX
-                },
-            }
-        },
-        {
-            '$group': {
-                '_id': '$uuid',
-                'dependencies': {'$push': '$dependencies'},
-            }
-        },
-        {
-            '$project': {
-                '_id': False,
-                'uuid': '$_id',
-                'dependencies': True,
-            }
-        },
-        {
-            '$unwind': {
-                'path': '$dependencies',
-                'preserveNullAndEmptyArrays': True,
-            }
-        },
-        {
-            '$unwind': {
-                'path': '$dependencies',
-                'preserveNullAndEmptyArrays': True,
-            }
-        },
-        {
-            '$group': {
-                '_id': '$uuid',
-                'dependencies': {'$push': '$dependencies'}
-            }
-        },
-        {
-            '$project': {
-                '_id': True,
-                'uuid': '$_id',
-                'dependencies': True
-            }
-        },
-    ]
-    return aggregation
+def _response_entry(document, derived_from):
+    entry = {key: document[key] for key in DATASET_FIELDS if key in document}
+    for key in TIMESTAMP_FIELDS:
+        if entry.get(key) is not None and not isinstance(
+                entry[key], (int, float)):
+            entry[key] = dtoolcore.utils.timestamp(entry[key])
+    entry["derived_from"] = sorted(derived_from)
+    return entry
 
 
-# TODO: datasets are uniquely identified by uuid AND base_uri.
-# Currently, the dependency graph is built based on uuids only, meaning the dep
-# graph query below will only yield one arbitrary dataset per uuid. Desired
-# behavior would be to yield all redundant dataset entries for a uuid.
-def query_dependency_graph(mongo_dependency_view,
-                           pre_query, post_query=None,
-                           dependency_keys=Config.DEPENDENCY_KEYS,
-                           mongo_collection=None):
-    """Aggregation pipeline for querying dependency view on datasets collection.
+def dependency_graph(collection, uuid, base_uris, dependency_keys,
+                     max_size=1000):
+    """Return the datasets in the same dependency graph as uuid.
 
-    :param pre_query: selects all documents for whicht to query the dependency graph.
-    :param post_query: allows removing certain documents from the results.
-    :param dependency_keys: list of keys identifying source datasets.
-    :param mongo_dependency_view: name of the plugin's view on a bidirectional dependency graph.
-    :param mongo_collection : name of the lookup server's central dataset metadata collection.
-
-    :returns: Aggregation pipeline as list of dicts.
+    :param collection: pymongo collection of dataset documents
+    :param uuid: UUID of the dataset to start from
+    :param base_uris: base URIs the user may search
+    :param dependency_keys: dotted paths of parent UUIDs in the documents
+    :param max_size: stop exploring once the graph has this many datasets
+    :returns: list of dataset entries (sorted by UUID), each with
+        ``derived_from``: the UUIDs of its parents within the result
     """
+    visible = {"base_uri": {"$in": list(base_uris)}}
+    if not base_uris or collection.count_documents(
+            {"uuid": uuid, **visible}, limit=1) == 0:
+        return []
 
-    pre_match = {'$match': pre_query}
+    key_projection = {key: True for key in dependency_keys}
+    key_projection.update({"uuid": True, "_id": False})
 
-    graph_lookup = {
-        '$graphLookup': {
-          'from': mongo_dependency_view,
-          'startWith': '$uuid',
-          'connectFromField': 'dependencies',
-          'connectToField': 'uuid',
-          'as': 'dependency_graph',
+    seen = {uuid}
+    frontier = {uuid} if dependency_keys else set()
+    while frontier and len(seen) < max_size:
+        neighbours = set()
+        # Parents named by the datasets of this level.
+        for doc in collection.find(
+                {"uuid": {"$in": sorted(frontier)}, **visible},
+                key_projection):
+            neighbours |= parents_of(doc, dependency_keys)
+        # Datasets naming a dataset of this level.
+        children_query = {
+            "$or": [{key: {"$in": sorted(frontier)}}
+                    for key in dependency_keys],
+            **visible,
         }
-    }
+        for doc in collection.find(children_query, {"uuid": True}):
+            neighbours.add(doc["uuid"])
 
-    unwind = {'$unwind': '$dependency_graph'}
+        candidates = neighbours - seen
+        if not candidates:
+            break
+        # Only datasets the user can see are part of the graph.
+        found = set(collection.distinct(
+            "uuid", {"uuid": {"$in": sorted(candidates)}, **visible}))
+        room = max_size - len(seen)
+        if len(found) > room:
+            logger.warning(
+                "Dependency graph of %s exceeds %d datasets; truncated.",
+                uuid, max_size)
+            found = set(sorted(found)[:room])
+        seen |= found
+        frontier = found
 
-    replace_root = {
-        '$replaceRoot': {
-            'newRoot': '$dependency_graph'
-        }
-    }
+    # One entry per UUID (a dataset may be registered in several base URIs:
+    # the first base URI in alphabetical order).
+    entries = {}
+    projection = {"_id": False, "manifest": False, "readme": False}
+    for doc in collection.find(
+            {"uuid": {"$in": sorted(seen)}, **visible}, projection,
+            sort=[("uuid", 1), ("base_uri", 1)]):
+        if doc["uuid"] in entries:
+            continue
+        derived_from = parents_of(doc, dependency_keys) & seen
+        entries[doc["uuid"]] = _response_entry(doc, derived_from)
 
-    lookup = {
-        '$lookup': {
-           'from': mongo_collection,
-           'localField': 'uuid',
-           'foreignField': 'uuid',
-           'as': 'dataset',
-         }
-    }
-
-    unwind_again = {'$unwind': '$dataset'}
-
-    replace_root_again = {
-        '$replaceRoot': {
-            'newRoot': '$dataset'
-        }
-    }
-
-    post_match = {}
-    if post_query:
-        post_match = {'$match': post_query}
-
-    # The interesting part is done here.
-    # Now follows some restructuring in order to always
-    # output unidirectional dependencies in a single 'dreived_from' field,
-    # independent on the actual dependency keys used.
-
-    # For each configured dependency key, the pipeline splits, unwinds and
-    # projects the key in a uniformely named field 'derived_from'
-    parallel_aggregations = []
-    for dep_key in dependency_keys:
-        cur_aggregation = []
-        hierarchy = dep_key.split('.')
-
-        for i in range(len(hierarchy)):
-            cur_aggregation.append(
-                {
-                    '$unwind': {
-                        'path': '$' + '.'.join(hierarchy[0:(i+1)]),
-                        'preserveNullAndEmptyArrays': True,
-                    }
-                }
-            )
-
-        cur_aggregation.append(
-            {
-                '$project': {
-                    '_id': False,
-                }
-            })
-        cur_aggregation.append(
-            {
-                '$addFields': {
-                    'derived_from': '$' + dep_key,
-                }
-            })
-        parallel_aggregations.append(cur_aggregation)
-
-    facet = {
-        '$facet': {
-            **{'key{:d}'.format(i): a for i, a in enumerate(parallel_aggregations)}
-        }
-    }
-
-    # eventually, flatten lists and kill all unwound redundancies
-    post_facet = [{
-            '$project': {
-                'nested': {
-                    '$concatArrays': ['$key{:d}'.format(i) for i in range(len(parallel_aggregations))]
-                }
-            }
-        }, {
-            '$unwind': {
-                'path': '$nested',
-                'preserveNullAndEmptyArrays': True,
-            }
-        }, {
-            '$group': {
-                '_id': '$nested.uuid',
-                'derived_from': {'$push': '$nested.derived_from'},
-                'nested': {'$mergeObjects': '$nested'}
-            }
-        }, {
-            '$addFields': {
-                'nested.uuid': '$_id',
-                'nested.derived_from': '$derived_from'
-            }
-        }, {
-            '$replaceRoot': {'newRoot': '$nested'}
-        }]
-
-    sort = {  # for deterministic behavior only
-        '$sort': {'uuid': 1}
-    }
-
-    project = {  # exclusion of fields as in utils.search_datasets_per_user
-        '$project': {
-            "_id": False,
-            "readme": False,
-            "manifest": False,
-            "annotations": False,
-        }
-    }
-
-    aggregation = [
-        pre_match,
-        graph_lookup,
-        unwind,
-        replace_root,
-        lookup,
-        unwind_again,
-        replace_root_again,
-        post_match,
-        facet,
-        *post_facet,
-        sort,
-        project
-    ]
-    return aggregation
+    return [entries[key] for key in sorted(entries)]

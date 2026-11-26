@@ -47,7 +47,8 @@ def test_query_dependency_graph_by_default_keys(tmp_app_with_dependent_data, tes
     assert compare_marked_nested(response, expected_response, marker)
 
 
-def test_query_dependency_graph_by_custom_keys(tmp_app_with_dependent_data, testing_family, grumpy_token):  # NOQA
+def test_query_dependency_graph_by_custom_keys(tmp_app_with_dynamic_keys, testing_family, grumpy_token):  # NOQA
+    tmp_app_with_dependent_data = tmp_app_with_dynamic_keys
 
     headers = dict(Authorization="Bearer " + grumpy_token)
 
@@ -93,7 +94,8 @@ def test_query_dependency_graph_by_custom_keys(tmp_app_with_dependent_data, test
     assert compare_marked_nested(response, expected_response, marker)
 
 
-def test_query_dependency_graph_by_custom_nonexistant_keys(tmp_app_with_dependent_data, testing_family, grumpy_token):  # NOQA
+def test_query_dependency_graph_by_custom_nonexistant_keys(tmp_app_with_dynamic_keys, testing_family, grumpy_token):  # NOQA
+    tmp_app_with_dependent_data = tmp_app_with_dynamic_keys
 
     headers = dict(Authorization="Bearer " + grumpy_token)
 
@@ -139,7 +141,10 @@ def test_query_dependency_graph_by_custom_nonexistant_keys(tmp_app_with_dependen
     assert compare_marked_nested(response, expected_response, marker)
 
 
-def test_generate_many_dependency_views(tmp_app_with_dependent_data, testing_family, grumpy_token):  # NOQA
+def test_many_custom_key_sets(tmp_app_with_dynamic_keys, testing_family, grumpy_token):  # NOQA
+    """Each request with other keys is answered (formerly, each set of
+    keys created a MongoDB view, with a cache of 10)."""
+    tmp_app_with_dependent_data = tmp_app_with_dynamic_keys
 
     headers = dict(Authorization="Bearer " + grumpy_token)
 
