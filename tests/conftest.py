@@ -158,10 +158,7 @@ def tmp_app_with_users(request):
         "FLASK_ENV": "development",
         "CONFIG_SECRETS_TO_OBFUSCATE": [],
         "ENABLE_DEPENDENCY_VIEW": True,
-        "MONGO_DEPENDENCY_VIEW_PREFIX": "dep:",
-        "MONGO_DEPENDENCY_VIEW_BOOKKEEPING": "dep_views",
-        "MONGO_DEPENDENCY_VIEW_CACHE_SIZE": 10,
-        "FORCE_REBUILD_DEPENDENCY_VIEW": False,
+        "DEPENDENCY_GRAPH_MAX_SIZE": 1000,
         "DEPENDENCY_KEYS": [
             'readme_parsed.derived_from.uuid',
             'annotations.source_dataset_uuid'
@@ -221,6 +218,16 @@ def tmp_app_with_users(request):
 
 @pytest.fixture
 def tmp_app_with_dependent_data(request):
+    return _app_with_dependent_data(request)
+
+
+@pytest.fixture
+def tmp_app_with_dynamic_keys(request):
+    return _app_with_dependent_data(
+        request, {"DYNAMIC_DEPENDENCY_KEYS": True})
+
+
+def _app_with_dependent_data(request, extra_config=None):
     from flask import current_app
     from dservercore.config import Config
     from dservercore import create_app, sql_db
@@ -255,6 +262,7 @@ def tmp_app_with_dependent_data(request):
         "JWT_TOKEN_LOCATION": "headers",
         "JWT_HEADER_NAME": "Authorization",
         "JWT_HEADER_TYPE": "Bearer",
+        **(extra_config or {}),
     }
 
     app = create_app(config)

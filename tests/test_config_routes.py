@@ -24,10 +24,7 @@ def test_config_info_route(tmp_app_with_users, snowwhite_token):  # NOQA
                             'annotations.source_dataset_uuid'],
         'dynamic_dependency_keys': True,
         'enable_dependency_view': True,
-        'force_rebuild_dependency_view': False,
-        'mongo_dependency_view_bookkeeping': 'dep_views',
-        'mongo_dependency_view_cache_size': 10,
-        'mongo_dependency_view_prefix': 'dep:',
+        'dependency_graph_max_size': 1000,
     }
 
     response = json.loads(r.data.decode("utf-8"))['config']

@@ -7,19 +7,14 @@ try:
     __version__ = version(__name__)
 except PackageNotFoundError:
     # package is not installed
-   pass
+    pass
 
-import datetime
 import logging
-import pymongo
-
-import dtoolcore.utils
 
 from flask import (
     abort,
     current_app,
     jsonify,
-    request
 )
 from dservercore.utils_auth import (
     jwt_required,
@@ -27,20 +22,15 @@ from dservercore.utils_auth import (
 )
 from flask_smorest import Blueprint
 from flask_smorest.pagination import PaginationParameters
-
 from pymongo import MongoClient
+from pymongo.errors import PyMongoError
 
 from dservercore import AuthenticationError, ExtensionABC
 from dservercore.sql_models import DatasetSchema
 from dservercore.utils import _preprocess_privileges
-from .utils import _dict_to_mongo_query
 
 from .schemas import DependencyKeysSchema
-
-from .graph import (
-    query_dependency_graph,
-    build_undirected_adjecency_lists,
-)
+from .graph import dependency_graph
 from .config import Config, CONFIG_SECRETS_TO_OBFUSCATE
 
 
@@ -50,220 +40,68 @@ graph_bp = Blueprint("graph", __name__, url_prefix="/graph")
 logger = logging.getLogger(__name__)
 
 
-def _list_to_collection_name(ls, prefix=Config.MONGO_DEPENDENCY_VIEW_PREFIX):
-    """Convert a list of str to a unique, valid mongo collection name.
-
-    See https://docs.mongodb.com/manual/reference/limits/#Restriction-on-Collection-Names."""
-    if not isinstance(ls, list) and not isinstance(ls, str):
-        raise ValueError('Type of ls must be list or str, but type({}) is {}.'.format(ls, type(ls)))
-    if isinstance(ls, str):
-        ls = [ls]
-    for l in ls:
-        if not isinstance(l, str):
-            raise ValueError('Type of all elements of ls must be str, but type({}) is {}.'.format(l, type(l)))
-        if l.find('$') != -1:
-            raise ValueError('No dollar char ($) allowed in collection name.')
-
-    coll_name = prefix + ','.join(ls)
-    coll_namespace = DependencyGraphExtension.db.name + '.' + coll_name
-    if len(coll_namespace) > 255:
-        raise ValueError('Maximum namespace length is 255, but len("{}") == {}.'.format(coll_namespace,
-                                                                                        len(coll_namespace)))
-    return coll_name
+def _config(key):
+    return current_app.config.get(key, getattr(Config, key))
 
 
-def _assert_list_of_mongo_keys(ls):
-    """Assert argument is list of valid mongo collection keys."""
-    if not isinstance(ls, list) and not isinstance(ls, str):
-        raise ValueError('Type of ls must be list or str, but type({}) is {}.'.format(ls, type(ls)))
-    if isinstance(ls, str):
-        ls = [ls]
-    for l in ls:
-        if not isinstance(l, str):
-            raise ValueError('Type of all elements of ls must be str, but type({}) is {}.'.format(l, type(l)))
-        if l.find('$') != -1:
-            raise ValueError('No dollar char ($) allowed.')
-    ls = list(sorted(ls))
-    if list(sorted(list(set(ls)))) != ls:
-        raise ValueError('Elements must be unique.')
-    return ls
+def dependency_graph_by_user_and_uuid(username, uuid, dependency_keys=None):
+    """Return all datasets within the same dependency graph as uuid.
 
-
-def _list_collection_names(prefix=Config.MONGO_DEPENDENCY_VIEW_PREFIX):
-    """List all collections whose name starts with prefix."""
-    filter = {"name": {"$regex": "^(?!{})".format(prefix)}}
-    return DependencyGraphExtension.db.list_collection_names(filter=filter)
-
-
-# low-level bookkeeping record helpers
-
-def assert_dependency_view_bookkeeping_collection(func):
-    """Assure the existance of the dependency view cache bookkeeping collection."""
-    def wrapper_assert_dependency_view_bookkeeping_collection(*args, **kwargs):
-        if Config.MONGO_DEPENDENCY_VIEW_BOOKKEEPING not in DependencyGraphExtension.db.list_collection_names():
-            DependencyGraphExtension.db.create_collection(Config.MONGO_DEPENDENCY_VIEW_BOOKKEEPING)
-        return func(*args, **kwargs)
-    return wrapper_assert_dependency_view_bookkeeping_collection
-
-
-@assert_dependency_view_bookkeeping_collection
-def _get_dependency_view_bookkeeping_record(dependency_keys):
-    """Query bookkeeping record for unique set of dependency keys."""
-    query = {'keys': dependency_keys}
-    return DependencyGraphExtension.db[Config.MONGO_DEPENDENCY_VIEW_BOOKKEEPING].find_one(query)
-
-
-@assert_dependency_view_bookkeeping_collection
-def _create_dependency_view_bookkeeping_record(name, dependency_keys):
-    ret = DependencyGraphExtension.db[Config.MONGO_DEPENDENCY_VIEW_BOOKKEEPING].insert_one(
-        {'name': name, 'keys': dependency_keys,
-         'accessed_on': datetime.datetime.now(datetime.timezone.utc)})
-    # drop oldest entry if number of documents exceeds allowed maximum
-    count = DependencyGraphExtension.db[Config.MONGO_DEPENDENCY_VIEW_BOOKKEEPING].count_documents({})
-    if count > Config.MONGO_DEPENDENCY_VIEW_CACHE_SIZE:
-        # get least recently accessed view and drop
-        to_drop = DependencyGraphExtension.db[Config.MONGO_DEPENDENCY_VIEW_BOOKKEEPING].find_one(sort=[('accessed_on', pymongo.ASCENDING)])
-        logger.warning("Maximum dependency view cache size %s exceeded by %s. "
-                       "Dropping least recently accessed view '%s': %s (%s)." % (
-                            Config.MONGO_DEPENDENCY_VIEW_CACHE_SIZE, count,
-                            to_drop["name"], to_drop["keys"], to_drop["accessed_on"]))
-        DependencyGraphExtension.db[to_drop["name"]].drop()
-        DependencyGraphExtension.db[Config.MONGO_DEPENDENCY_VIEW_BOOKKEEPING].delete_one(to_drop)
-    return ret
-
-
-@assert_dependency_view_bookkeeping_collection
-def _update_dependency_view_bookkeeping_record(name):
-    """Updated record to dependency view bookkeeping collection or add if new."""
-    return DependencyGraphExtension.db[Config.MONGO_DEPENDENCY_VIEW_BOOKKEEPING].update_one(
-        {'name': name},
-        {'$set': {'accessed_on': datetime.datetime.now(datetime.timezone.utc)}})
-
-
-# mid-level dependency view helpers
-def _create_dependency_view(dependency_keys):
-    """Create a new view for dependency_keys and the according bookkeeping record.
-
-    :param dependency_keys: list of str
-    :returns: str"""
-
-    # generate unique, valid name for view from prefix and ISO date string
-    datestring = datetime.datetime.now(
-        datetime.timezone.utc).replace(tzinfo=None).isoformat()
-    name = Config.MONGO_DEPENDENCY_VIEW_PREFIX + datestring
-
-    if name in DependencyGraphExtension.db.list_collection_names():
-        raise ValueError("View '%s' exists already." % name)  # must never happen
-
-    aggregation_pipeline = build_undirected_adjecency_lists(dependency_keys)
-    logger.debug("Create view '%s' with %s." % (name, aggregation_pipeline))
-    DependencyGraphExtension.db.command(
-        'create',
-        name, viewOn=current_app.config['MONGO_COLLECTION'],
-        pipeline=aggregation_pipeline)
-    # raises pymongo.errors.OperationFailure
-    _create_dependency_view_bookkeeping_record(name, dependency_keys)
-    return name
-
-
-def _get_dependency_view_from_keys(dependency_keys=Config.DEPENDENCY_KEYS):
-    """Get a bidirectional dependency view on the core collection."""
-    dependency_keys = _assert_list_of_mongo_keys(dependency_keys)
-
-    dependency_view_doc = _get_dependency_view_bookkeeping_record(dependency_keys)
-
-    # If no bookkeeping record for desired view exists, create view.
-    if dependency_view_doc is None:
-        dependency_view = _create_dependency_view(dependency_keys)
-        return dependency_view
-
-    dependency_view = dependency_view_doc["name"]
-
-    # Bookkeeping record exists but view disappeared, recreate.
-    if dependency_view not in DependencyGraphExtension.db.list_collection_names():
-        logger.warning("Bookkeeping record for view '{}' still exists, "
-                       "while view itself vanished. Recreating.".format(dependency_view))
-        dependency_view = _create_dependency_view(dependency_keys)
-        return dependency_view
-
-    # View exists, but FORCE_REBUILD_DEPENDENCY_VIEW enforces recreation at every query.
-    if Config.FORCE_REBUILD_DEPENDENCY_VIEW:
-        logger.warning("Forced to drop exisitng view '{}'.".format(dependency_view))
-        DependencyGraphExtension.db[dependency_view].drop()
-        dependency_view = _create_dependency_view(dependency_keys)
-        return dependency_view
-
-    # Update accessed_on datetime.
-    _update_dependency_view_bookkeeping_record(dependency_view)
-    return dependency_view
-
-
-def dependency_graph_by_user_and_uuid(username, uuid, dependency_keys=Config.DEPENDENCY_KEYS):
-    """Aggregate all datasets within the same dependency graph as uuid.
+    Only datasets in base URIs the user may search are traversed and
+    returned.
 
     :param username: username
     :param uuid: UUID of dataset to start dependency graph search from
+    :param dependency_keys: keys naming parent UUIDs; the configured
+        DEPENDENCY_KEYS if None, or if DYNAMIC_DEPENDENCY_KEYS is disabled
     :returns: List of dicts if user is valid and has access to datasets.
               Empty list if user is valid but has not got access to any
               datasets.
     :raises: AuthenticationError if user is invalid.
     """
-
-    # enable undirected view on dependency graph
-    if not Config.ENABLE_DEPENDENCY_VIEW:
+    if not _config("ENABLE_DEPENDENCY_VIEW"):
         logger.warning(
             "Received dependency graph request from user '{}', but "
             "feature is disabled.".format(username))
-        return []  # silently reject request
-
-    # disable dynamic dependency keys
-    if not Config.DYNAMIC_DEPENDENCY_KEYS and sorted(dependency_keys) != sorted(Config.DEPENDENCY_KEYS):
-        logger.warning(
-            "Received dependency graph request for dynamic keys '{}' from user "
-            "'{}', but dynamic dependency key feature is disabled. Set env "
-            "var DSERVER_DYNAMIC_DEPENDENCY_KEYS=True to enable.".format(
-                dependency_keys, username))
-        dependency_keys = Config.DEPENDENCY_KEYS
-
-    dependency_view = _get_dependency_view_from_keys(dependency_keys)
-
-    # in the pipeline, we need to filter privileges two times. Initially,
-    # when looking up the specified uuid , and subsequently after building
-    # the dependency graph for the hypothetical case of the user not having
-    # sufficient privileges to view all datasets within the same graph.
-    # Building those pre- and post-queries relies on the _dict_to_mongo_query
-    # utility function and hence requires the 'uuids' keyword configured as
-    # an allowed query key. This is the default configuration in config.Config.
-    pre_query = _preprocess_privileges(username, {'uuids': [uuid]})
-    post_query = _preprocess_privileges(username, {})
-
-    # If there are no base URIs at this point it means that the user has not
-    # got privileges to search for anything.
-    if (len(pre_query["base_uris"]) == 0) or len(post_query["base_uris"]) == 0:
         return []
 
-    pre_query = _dict_to_mongo_query(pre_query)
-    post_query = _dict_to_mongo_query(post_query)
+    default_keys = list(_config("DEPENDENCY_KEYS"))
+    if dependency_keys is None:
+        dependency_keys = default_keys
+    elif not _config("DYNAMIC_DEPENDENCY_KEYS") and \
+            sorted(dependency_keys) != sorted(default_keys):
+        logger.info(
+            "Ignoring dependency keys '{}' from user '{}': dynamic dependency "
+            "keys are disabled (DSERVER_DYNAMIC_DEPENDENCY_KEYS).".format(
+                dependency_keys, username))
+        dependency_keys = default_keys
+    for key in dependency_keys:
+        if not key or "$" in key:
+            raise ValueError(f"Invalid dependency key: {key!r}")
 
-    datasets = []
-    mongo_aggregation = query_dependency_graph(pre_query=pre_query,
-                                               post_query=post_query,
-                                               dependency_keys=dependency_keys,
-                                               mongo_dependency_view=dependency_view,
-                                               mongo_collection=current_app.config['MONGO_COLLECTION'])
-    logger.debug("Constructed mongo aggregation: {}".format(mongo_aggregation))
-    cx = DependencyGraphExtension.db[current_app.config['MONGO_COLLECTION']].aggregate(mongo_aggregation)
+    base_uris = _preprocess_privileges(username, {})["base_uris"]
+    if not base_uris:
+        return []
 
-    for ds in cx:
-        # Convert datetime object to float timestamp.
-        for key in ("created_at", "frozen_at"):
-            if key in ds:
-                datetime_obj = ds[key]
-                ds[key] = dtoolcore.utils.timestamp(datetime_obj)
+    return dependency_graph(
+        DependencyGraphExtension.db[current_app.config["MONGO_COLLECTION"]],
+        uuid, base_uris, dependency_keys,
+        max_size=int(_config("DEPENDENCY_GRAPH_MAX_SIZE")))
 
-        datasets.append(ds)
 
-    return datasets
+def _respond(pagination_parameters, username, uuid, dependency_keys=None):
+    try:
+        datasets = dependency_graph_by_user_and_uuid(
+            username, uuid, dependency_keys)
+    except AuthenticationError:
+        abort(401)
+    except ValueError as e:
+        abort(400, str(e))
+    pagination_parameters.item_count = len(datasets)
+    return jsonify(
+        datasets[pagination_parameters.first_item:
+                 pagination_parameters.last_item + 1]
+    )
 
 
 @graph_bp.route("/uuids/<uuid>", methods=["GET"])
@@ -273,17 +111,11 @@ def dependency_graph_by_user_and_uuid(username, uuid, dependency_keys=Config.DEP
 def lookup_dependency_graph_by_default_keys(pagination_parameters: PaginationParameters,
                                             uuid):
     """List the datasets within the same dependency graph as <uuid>.
-    If not all datasets are accessible by the user, an incomplete, disconnected
-    graph may arise."""
-    username = get_jwt_identity()
-    try:
-        datasets = dependency_graph_by_user_and_uuid(username, uuid)
-    except AuthenticationError:
-        abort(401)
-    pagination_parameters.item_count = len(datasets)
-    return jsonify(
-        datasets[pagination_parameters.first_item: pagination_parameters.last_item + 1]
-    )
+
+    Each dataset carries ``derived_from``, the UUIDs of its parents within
+    the result. Only datasets the user can search are traversed, so the
+    graph may be incomplete."""
+    return _respond(pagination_parameters, get_jwt_identity(), uuid)
 
 
 @graph_bp.route("/uuids/<uuid>", methods=["POST"])
@@ -294,19 +126,10 @@ def lookup_dependency_graph_by_default_keys(pagination_parameters: PaginationPar
 def lookup_dependency_graph_by_custom_keys(dependency_keys: DependencyKeysSchema,
                                            pagination_parameters: PaginationParameters,
                                            uuid):
-    """List the datasets within the same dependency graph as <uuid>.
-    If not all datasets are accessible by the user, an incomplete, disconnected
-    graph may arise."""
-    username = get_jwt_identity()
-    # dependency_keys = request.get_json()
-    try:
-        datasets = dependency_graph_by_user_and_uuid(username, uuid, dependency_keys["dependency_keys"])
-    except AuthenticationError:
-        abort(401)
-    pagination_parameters.item_count = len(datasets)
-    return jsonify(
-        datasets[pagination_parameters.first_item: pagination_parameters.last_item + 1]
-    )
+    """List the datasets within the same dependency graph as <uuid>, with
+    custom dependency keys (if DYNAMIC_DEPENDENCY_KEYS is enabled)."""
+    return _respond(pagination_parameters, get_jwt_identity(), uuid,
+                    dependency_keys.get("dependency_keys"))
 
 
 class DependencyGraphExtension(ExtensionABC):
@@ -340,8 +163,23 @@ class DependencyGraphExtension(ExtensionABC):
         except KeyError:
             raise(RuntimeError("Please set the MONGO_COLLECTION environment variable"))  # NOQA
 
+        self._create_indexes(
+            app.config.get("DEPENDENCY_KEYS", Config.DEPENDENCY_KEYS))
+
+    def _create_indexes(self, dependency_keys):
+        """Index uuid and the dependency keys, which the traversal queries.
+
+        Creating an index that exists is a no-op. Failures (e.g. missing
+        privileges, MongoDB not reachable yet) only slow queries down."""
+        for key in ["uuid", *dependency_keys]:
+            try:
+                DependencyGraphExtension.collection.create_index(key)
+            except PyMongoError as e:
+                logger.warning("Could not create index on '%s': %s", key, e)
+
     def register_dataset(self, dataset_info):
-        """Does nothing, relies on dserver-direct-mongo-plugin."""
+        """Does nothing: the graph is read from the search plugin's
+        collection."""
         pass
 
     def get_config(self):
