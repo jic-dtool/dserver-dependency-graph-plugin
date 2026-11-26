@@ -39,7 +39,7 @@ Tests spin up a real dserver app via `create_app` and a temporary mongo database
 installs `dservercore`, `dserver-search-plugin-mongo`, `dserver-retrieve-plugin-mongo`,
 and `dserver-direct-mongo-plugin` from their `main` branches first.
 
-Build backend is `flit_scm`; version is derived from git tags via `setuptools_scm` and
+Build backend is `hatchling` + `hatch-vcs`; version is derived from git tags and
 written to `dserver_dependency_graph_plugin/version.py` (do not edit by hand).
 
 ## Routes (actual)

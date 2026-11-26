@@ -1,6 +1,6 @@
 [build-system]
-requires = ["flit_scm"]
-build-backend = "flit_scm:buildapi"
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
 
 [project]
 name = "dserver-dependency-graph-plugin"
@@ -35,13 +35,18 @@ Changelog = "https://github.com/jic-dtool/dserver-dependency-graph-plugin/blob/m
 [project.entry-points."dservercore.extension"]
 DependencyGraphExtension = "dserver_dependency_graph_plugin:DependencyGraphExtension"
 
-[tool.flit.module]
-name = "dserver_dependency_graph_plugin"
+[tool.hatch.version]
+source = "vcs"
+raw-options = { version_scheme = "guess-next-dev", local_scheme = "no-local-version" }
 
-[tool.setuptools_scm]
-version_scheme = "guess-next-dev"
-local_scheme = "no-local-version"
-write_to = "dserver_dependency_graph_plugin/version.py"
+[tool.hatch.build.hooks.vcs]
+version-file = "dserver_dependency_graph_plugin/version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dserver_dependency_graph_plugin"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [".github", ".pre-commit-config.yaml", "CLAUDE.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
