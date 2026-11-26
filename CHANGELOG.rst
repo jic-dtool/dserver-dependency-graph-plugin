@@ -20,6 +20,8 @@ Unreleased
 * Removed ``DSERVER_FORCE_REBUILD_DEPENDENCY_VIEW`` and
   ``DSERVER_MONGO_DEPENDENCY_VIEW_PREFIX``, ``..._BOOKKEEPING``,
   ``..._CACHE_SIZE``.
+* Build system changed from ``setuptools`` to ``hatchling`` with ``hatch-vcs``;
+  the version is still derived from git tags
 
 0.4.2 (13Oct25)
 ---------------

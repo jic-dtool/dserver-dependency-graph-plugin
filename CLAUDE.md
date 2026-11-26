@@ -35,11 +35,11 @@ flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
 Tests spin up a real dserver app via `create_app` and a temporary mongo database per run
 (`conftest.py`). **A MongoDB server must be reachable** — there is no mocking layer. CI
-(`.github/workflows/test.yml`) runs a matrix of Python 3.8–3.12 × MongoDB 4.2–6.0 and
+(`.github/workflows/test.yml`) runs a matrix of Python 3.10–3.13 × MongoDB 6.0–8.0 and
 installs `dservercore`, `dserver-search-plugin-mongo`, `dserver-retrieve-plugin-mongo`,
 and `dserver-direct-mongo-plugin` from their `main` branches first.
 
-Build backend is `flit_scm`; version is derived from git tags via `setuptools_scm` and
+Build backend is `hatchling` + `hatch-vcs`; version is derived from git tags and
 written to `dserver_dependency_graph_plugin/version.py` (do not edit by hand).
 
 ## Routes (actual)
